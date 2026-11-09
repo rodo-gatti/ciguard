@@ -11,7 +11,7 @@ fn sarif_output_and_exit_code() {
         "on: push\njobs:\n  a:\n    steps:\n      - uses: actions/checkout@v4\n",
     )
     .unwrap();
-    let out = Command::cargo_bin("actionguard")
+    let out = Command::cargo_bin("ciguard")
         .unwrap()
         .arg(dir.path())
         .args(["--format", "sarif"])

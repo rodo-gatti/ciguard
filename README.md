@@ -1,20 +1,20 @@
-# actionguard
+# ciguard
 
 Fast Rust CLI that audits GitHub Actions workflows for **security** and **CI-cost** problems.
 
 ## Install
 
 ```sh
-cargo install actionguard   # or: cargo install --path .
+cargo install ciguard   # or: cargo install --path .
 ```
 
 ## Usage
 
 ```sh
-actionguard                          # scan ./.github/workflows
-actionguard path/to/repo --format sarif > results.sarif
-actionguard --fail-on medium         # CI gate (exit 1 on findings >= severity)
-actionguard --fix                    # pin tag-referenced actions to commit SHAs
+ciguard                          # scan ./.github/workflows
+ciguard path/to/repo --format sarif > results.sarif
+ciguard --fail-on medium         # CI gate (exit 1 on findings >= severity)
+ciguard --fix                    # pin tag-referenced actions to commit SHAs
 ```
 
 `--fix` queries the GitHub API (set `GITHUB_TOKEN` to avoid rate limits) and rewrites
@@ -43,7 +43,7 @@ permissions:
   security-events: write
 steps:
   - uses: actions/checkout@v4
-  - uses: rodo-gatti/actionguard@main
+  - uses: rodo-gatti/ciguard@main
     with:
       fail-on: high
 ```

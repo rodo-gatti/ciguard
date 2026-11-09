@@ -35,7 +35,7 @@ pub fn to_sarif(findings: &[Finding]) -> Value {
         "version": "2.1.0",
         "runs": [{
             "tool": { "driver": {
-                "name": "actionguard",
+                "name": "ciguard",
                 "version": env!("CARGO_PKG_VERSION"),
                 "informationUri": env!("CARGO_PKG_REPOSITORY"),
                 "rules": rules

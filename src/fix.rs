@@ -7,7 +7,7 @@ fn resolve(repo: &str, git_ref: &str) -> Result<String> {
     let url = format!("https://api.github.com/repos/{repo}/commits/{git_ref}");
     let mut req = ureq::get(&url)
         .set("Accept", "application/vnd.github.sha")
-        .set("User-Agent", "actionguard");
+        .set("User-Agent", "ciguard");
     if let Ok(t) = std::env::var("GITHUB_TOKEN") {
         req = req.set("Authorization", &format!("Bearer {t}"));
     }

@@ -6,7 +6,7 @@ GitHub Actions workflows run with access to your secrets and your repo. Yet most
 actions to mutable tags, so a compromised tag (as in the `tj-actions/changed-files` incident)
 runs attacker code in your pipeline.
 
-I built [actionguard](https://github.com/rodo-gatti/actionguard), a Rust CLI that checks workflows
+I built [ciguard](https://github.com/rodo-gatti/ciguard), a Rust CLI that checks workflows
 for security and cost problems, and ran it on a few well-known projects:
 
 | Repo | unpinned actions | jobs without timeout | missing cache | expensive runners |
@@ -27,8 +27,8 @@ every action to a SHA automatically.
 
 ## Try it
 ```sh
-cargo install actionguard
-actionguard --fix
+cargo install ciguard
+ciguard --fix
 ```
 
 *Note: these are hygiene findings, not vulnerabilities. Don't open noisy issues; send small,

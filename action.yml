@@ -1,4 +1,4 @@
-name: actionguard
+name: ciguard
 description: Audit GitHub Actions workflows for security and CI-cost issues
 inputs:
   fail-on:
@@ -7,18 +7,18 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install actionguard
+    - name: Install ciguard
       shell: bash
-      run: cargo install --locked --git https://github.com/rodo-gatti/actionguard --root "$RUNNER_TEMP/ag"
+      run: cargo install --locked --git https://github.com/rodo-gatti/ciguard --root "$RUNNER_TEMP/ag"
     - name: Generate SARIF
       shell: bash
-      run: '"$RUNNER_TEMP/ag/bin/actionguard" . --format sarif --fail-on high > actionguard.sarif || true'
+      run: '"$RUNNER_TEMP/ag/bin/ciguard" . --format sarif --fail-on high > ciguard.sarif || true'
     - name: Upload SARIF
       uses: github/codeql-action/upload-sarif@9418214df1f2c4b8128c770156c409013b07d6b9 # v3
       with:
-        sarif_file: actionguard.sarif
+        sarif_file: ciguard.sarif
     - name: Gate
       shell: bash
       env:
         FAIL_ON: ${{ inputs.fail-on }}
-      run: '"$RUNNER_TEMP/ag/bin/actionguard" . --fail-on "$FAIL_ON"'
+      run: '"$RUNNER_TEMP/ag/bin/ciguard" . --fail-on "$FAIL_ON"'

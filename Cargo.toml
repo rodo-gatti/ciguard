@@ -1,10 +1,10 @@
 [package]
-name = "actionguard"
+name = "ciguard"
 version = "0.1.0"
 edition = "2024"
 description = "Audit GitHub Actions workflows for security and CI-cost issues"
 license = "MIT"
-repository = "https://github.com/rodo-gatti/actionguard"
+repository = "https://github.com/rodo-gatti/ciguard"
 readme = "README.md"
 keywords = ["github-actions", "security", "ci", "linter", "sarif"]
 categories = ["command-line-utilities", "development-tools"]
