@@ -1,5 +1,5 @@
-use crate::rules::{Finding, Severity, RULES};
-use serde_json::{json, Value};
+use crate::rules::{Finding, RULES, Severity};
+use serde_json::{Value, json};
 
 fn level(s: Severity) -> &'static str {
     match s {

@@ -4,8 +4,12 @@ Fast Rust CLI that audits GitHub Actions workflows for **security** and **CI-cos
 
 ## Install
 
+Download the archive for your platform from [GitHub Releases](https://github.com/rodo-gatti/ciguard/releases), verify it against `SHA256SUMS`, and put the `ciguard` binary on your `PATH`.
+
+The crate is not published to crates.io yet. For a local development install:
+
 ```sh
-cargo install ciguard   # or: cargo install --path .
+cargo install --path .
 ```
 
 ## Example

@@ -1,5 +1,5 @@
 use crate::rules::is_sha;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
 
 /// Resolves a tag or branch of `owner/repo` to a full commit SHA via the GitHub API.
@@ -11,8 +11,12 @@ fn resolve(repo: &str, git_ref: &str) -> Result<String> {
     if let Ok(t) = std::env::var("GITHUB_TOKEN") {
         req = req.set("Authorization", &format!("Bearer {t}"));
     }
-    let sha = req.call().with_context(|| format!("resolving {repo}@{git_ref}"))?
-        .into_string()?.trim().to_string();
+    let sha = req
+        .call()
+        .with_context(|| format!("resolving {repo}@{git_ref}"))?
+        .into_string()?
+        .trim()
+        .to_string();
     if !is_sha(&sha) {
         bail!("unexpected response resolving {repo}@{git_ref}");
     }
@@ -40,11 +44,21 @@ pub fn pin_actions(text: &str, resolver: &dyn Fn(&str, &str) -> Result<String>) 
     for line in text.lines() {
         let trimmed = line.trim_start();
         let body = trimmed.strip_prefix("- ").unwrap_or(trimmed);
-        let uses = body.strip_prefix("uses:").map(|u| u.split('#').next().unwrap_or("").trim().trim_matches(|c| c == '"' || c == '\''));
+        let uses = body.strip_prefix("uses:").map(|u| {
+            u.split('#')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .trim_matches(|c| c == '"' || c == '\'')
+        });
         if let Some((repo, r)) = uses.and_then(parse) {
             let sha = cache
                 .entry((repo.clone(), r.clone()))
-                .or_insert_with(|| resolver(&repo, &r).map_err(|e| eprintln!("warning: {e:#}")).ok())
+                .or_insert_with(|| {
+                    resolver(&repo, &r)
+                        .map_err(|e| eprintln!("warning: {e:#}"))
+                        .ok()
+                })
                 .clone();
             if let Some(sha) = sha {
                 let old = format!("{}@{r}", uses.unwrap());

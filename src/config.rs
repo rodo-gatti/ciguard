@@ -71,9 +71,9 @@ pub fn suppress(text: &str, findings: Vec<Finding>) -> Vec<Finding> {
         .filter_map(|l| directive(l, "ciguard:ignore-file"))
         .flatten()
         .collect();
-    let file_all = lines.iter().any(|l| {
-        directive(l, "ciguard:ignore-file").is_some_and(|r| r.is_empty())
-    });
+    let file_all = lines
+        .iter()
+        .any(|l| directive(l, "ciguard:ignore-file").is_some_and(|r| r.is_empty()));
 
     findings
         .into_iter()
@@ -99,28 +99,41 @@ mod tests {
     use super::*;
 
     fn f(rule: &'static str, line: usize) -> Finding {
-        Finding { file: "x".into(), line, rule, severity: Severity::Low, message: String::new() }
+        Finding {
+            file: "x".into(),
+            line,
+            rule,
+            severity: Severity::Low,
+            message: String::new(),
+        }
     }
 
     #[test]
     fn inline_and_file_ignores() {
         let text = "a: 1\n# ciguard:ignore missing-timeout\njob:\nuses: x # ciguard:ignore unpinned-action, outdated-action\nother:\n";
-        let out = suppress(text, vec![
-            f("missing-timeout", 3),
-            f("missing-timeout", 5),
-            f("unpinned-action", 4),
-            f("missing-cache", 4),
-        ]);
+        let out = suppress(
+            text,
+            vec![
+                f("missing-timeout", 3),
+                f("missing-timeout", 5),
+                f("unpinned-action", 4),
+                f("missing-cache", 4),
+            ],
+        );
         let rules: Vec<_> = out.iter().map(|x| (x.rule, x.line)).collect();
         assert_eq!(rules, vec![("missing-timeout", 5), ("missing-cache", 4)]);
 
-        let out = suppress("# ciguard:ignore-file missing-cache\n", vec![f("missing-cache", 9)]);
+        let out = suppress(
+            "# ciguard:ignore-file missing-cache\n",
+            vec![f("missing-cache", 9)],
+        );
         assert!(out.is_empty());
     }
 
     #[test]
     fn config_disable_and_severity() {
-        let c: Config = toml::from_str("disable=[\"a\"]\n[severity]\nmissing-timeout=\"high\"\n").unwrap();
+        let c: Config =
+            toml::from_str("disable=[\"a\"]\n[severity]\nmissing-timeout=\"high\"\n").unwrap();
         let out = c.apply(vec![f("a", 1), f("missing-timeout", 1)]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].severity, Severity::High);

@@ -11,7 +11,10 @@ use std::process::ExitCode;
 use walkdir::WalkDir;
 
 #[derive(Parser)]
-#[command(version, about = "Audit GitHub Actions workflows for security and cost issues")]
+#[command(
+    version,
+    about = "Audit GitHub Actions workflows for security and cost issues"
+)]
 struct Cli {
     /// Repository root or a single workflow file
     #[arg(default_value = ".")]
@@ -43,7 +46,11 @@ fn workflow_files(path: &Path) -> Vec<PathBuf> {
     WalkDir::new(path.join(".github/workflows"))
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|x| x == "yml" || x == "yaml"))
+        .filter(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|x| x == "yml" || x == "yaml")
+        })
         .map(|e| e.into_path())
         .collect()
 }
@@ -73,7 +80,10 @@ fn run() -> Result<bool> {
         Format::Sarif => println!("{}", serde_json::to_string_pretty(&sarif::to_sarif(&all))?),
         Format::Text => {
             for f in &all {
-                println!("[{:?}] {}:{} {} - {}", f.severity, f.file, f.line, f.rule, f.message);
+                println!(
+                    "[{:?}] {}:{} {} - {}",
+                    f.severity, f.file, f.line, f.rule, f.message
+                );
             }
             println!("{} finding(s)", all.len());
         }
