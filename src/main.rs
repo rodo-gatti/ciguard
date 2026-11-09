@@ -1,3 +1,4 @@
+mod config;
 mod fix;
 mod rules;
 mod sarif;
@@ -23,6 +24,9 @@ struct Cli {
     /// Pin tag-referenced actions to commit SHAs in place (uses the GitHub API; honors GITHUB_TOKEN)
     #[arg(long)]
     fix: bool,
+    /// Path to a config file (default: .ciguard.toml in the scanned directory)
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -47,6 +51,7 @@ fn workflow_files(path: &Path) -> Vec<PathBuf> {
 fn run() -> Result<bool> {
     let cli = Cli::parse();
     let mut all: Vec<Finding> = Vec::new();
+    let cfg = config::Config::load(cli.config.as_deref(), &cli.path)?;
     for file in workflow_files(&cli.path) {
         let mut text = std::fs::read_to_string(&file)
             .with_context(|| format!("reading {}", file.display()))?;
@@ -59,8 +64,10 @@ fn run() -> Result<bool> {
                 text = fixed;
             }
         }
-        all.extend(rules::analyze(&file.display().to_string(), &text)?);
+        let found = rules::analyze(&file.display().to_string(), &text)?;
+        all.extend(config::suppress(&text, found));
     }
+    let all = cfg.apply(all);
     match cli.format {
         Format::Json => println!("{}", serde_json::to_string_pretty(&all)?),
         Format::Sarif => println!("{}", serde_json::to_string_pretty(&sarif::to_sarif(&all))?),

@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use clap::ValueEnum;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     Low,
@@ -30,7 +30,32 @@ pub const RULES: &[(&str, &str)] = &[
     ("missing-concurrency", "Workflow can run redundant parallel runs"),
     ("missing-cache", "Dependency setup action without caching"),
     ("expensive-runner", "macOS/Windows runner costs more per minute"),
+    ("write-all-permissions", "GITHUB_TOKEN granted write-all permissions"),
+    ("secrets-inherit", "Reusable workflow receives every secret via `secrets: inherit`"),
+    ("workflow-run-checkout", "workflow_run workflow checks out untrusted code"),
+    ("outdated-action", "Action version is deprecated or runs on an unsupported Node runtime"),
+    ("deprecated-command", "Uses removed workflow commands such as ::set-output"),
 ];
+
+/// (action, first supported major version)
+const MIN_MAJOR: &[(&str, u32)] = &[
+    ("actions/checkout", 4),
+    ("actions/upload-artifact", 4),
+    ("actions/download-artifact", 4),
+    ("actions/cache", 4),
+    ("actions/setup-node", 4),
+    ("actions/setup-python", 5),
+    ("actions/setup-go", 5),
+    ("actions/setup-java", 4),
+    ("actions/github-script", 7),
+    ("docker/build-push-action", 5),
+    ("docker/login-action", 3),
+    ("docker/setup-buildx-action", 3),
+    ("github/codeql-action/init", 3),
+    ("github/codeql-action/analyze", 3),
+];
+
+const DEPRECATED_COMMANDS: &[&str] = &["::set-output", "::save-state", "::set-env", "::add-path"];
 
 const UNTRUSTED: &[&str] = &[
     "github.event.issue.title",
@@ -70,6 +95,25 @@ fn has_trigger(on: Option<&Value>, name: &str) -> bool {
     })
 }
 
+/// Parses the major version out of `v4`, `v4.1.2` or `4`.
+fn major(r: &str) -> Option<u32> {
+    r.trim_start_matches('v').split('.').next()?.parse().ok()
+}
+
+/// Version for an action ref: the tag itself, or the `# vN` comment next to a pinned SHA.
+fn version_of(r: &str, line: &str) -> Option<u32> {
+    if is_sha(r) {
+        let (_, c) = line.split_once('#')?;
+        major(c.split_whitespace().next()?)
+    } else {
+        major(r)
+    }
+}
+
+fn is_write_all(v: Option<&Value>) -> bool {
+    v.and_then(Value::as_str) == Some("write-all")
+}
+
 pub fn analyze(file: &str, text: &str) -> Result<Vec<Finding>> {
     let doc: Value = serde_yaml::from_str(text).with_context(|| format!("parsing {file}"))?;
     let lines: Vec<&str> = text.lines().collect();
@@ -81,10 +125,19 @@ pub fn analyze(file: &str, text: &str) -> Result<Vec<Finding>> {
     // Some YAML parsers read the `on` key as boolean true; accept both.
     let on = doc.get("on").or_else(|| doc.get(Value::Bool(true)));
     let prt = has_trigger(on, "pull_request_target");
+    let wr = has_trigger(on, "workflow_run");
 
-    if doc.get("permissions").is_none() {
+    let jobs = doc.get("jobs").and_then(Value::as_mapping);
+    let jobs_all_scoped = jobs.is_some_and(|j| {
+        !j.is_empty() && j.values().all(|job| job.get("permissions").is_some())
+    });
+    if doc.get("permissions").is_none() && !jobs_all_scoped {
         add("missing-permissions", Severity::Medium, 1,
-            "no top-level `permissions`; token defaults may be overly broad".into());
+            "no `permissions` at workflow level or on every job; token defaults may be overly broad".into());
+    }
+    if is_write_all(doc.get("permissions")) {
+        add("write-all-permissions", Severity::High, locate(&lines, "write-all", 0),
+            "workflow grants `write-all` to GITHUB_TOKEN; list only the scopes needed".into());
     }
     if doc.get("concurrency").is_none()
         && (has_trigger(on, "pull_request") || has_trigger(on, "push"))
@@ -93,7 +146,7 @@ pub fn analyze(file: &str, text: &str) -> Result<Vec<Finding>> {
             "no `concurrency` group; superseded runs keep consuming minutes".into());
     }
 
-    let Some(jobs) = doc.get("jobs").and_then(Value::as_mapping) else {
+    let Some(jobs) = jobs else {
         return Ok(out);
     };
     let jobs_line = locate(&lines, "jobs:", 0).saturating_sub(1);
@@ -102,6 +155,14 @@ pub fn analyze(file: &str, text: &str) -> Result<Vec<Finding>> {
         let job_line = locate(&lines, &format!("{name}:"), jobs_line);
         let next = job_line.max(1) - 1;
 
+        if is_write_all(job.get("permissions")) {
+            add("write-all-permissions", Severity::High, locate(&lines, "write-all", next),
+                format!("job `{name}` grants `write-all` to GITHUB_TOKEN; list only the scopes needed"));
+        }
+        if job.get("secrets").and_then(Value::as_str) == Some("inherit") {
+            add("secrets-inherit", Severity::Medium, locate(&lines, "inherit", next),
+                format!("job `{name}` passes all secrets with `secrets: inherit`; pass only what the callee needs"));
+        }
         if job.get("timeout-minutes").is_none() && job.get("uses").is_none() {
             add("missing-timeout", Severity::Low, job_line,
                 format!("job `{name}` has no timeout-minutes (default 360 min can waste CI spend)"));
@@ -112,37 +173,64 @@ pub fn analyze(file: &str, text: &str) -> Result<Vec<Finding>> {
                 format!("job `{name}` runs on `{runner}` (billed at a multiple of Linux)"));
         }
         let Some(steps) = job.get("steps").and_then(Value::as_sequence) else { continue };
+        let uses_of = |s: &Value| s.get("uses").and_then(Value::as_str).map(str::to_lowercase);
+        let job_caches = steps.iter().filter_map(uses_of).any(|u| u.contains("cache"));
         for step in steps {
             if let Some(uses) = step.get("uses").and_then(Value::as_str) {
                 let line = locate(&lines, uses, next);
+                let (action, r) = uses.split_once('@').unwrap_or((uses, ""));
                 if !uses.starts_with("./") && !uses.starts_with("docker://") {
-                    let r = uses.split_once('@').map(|x| x.1).unwrap_or("");
                     if !is_sha(r) {
                         add("unpinned-action", Severity::High, line,
                             format!("job `{name}`: `{uses}` is not pinned to a commit SHA"));
                     }
+                    let line_text = lines.get(line.wrapping_sub(1)).copied().unwrap_or("");
+                    if let Some(min) = MIN_MAJOR.iter().find(|(a, _)| *a == action).map(|x| x.1)
+                        && let Some(v) = version_of(r, line_text)
+                        && v < min
+                    {
+                        add("outdated-action", Severity::Medium, line,
+                            format!("job `{name}`: `{action}` v{v} is deprecated; use v{min} or newer"));
+                    }
                 }
-                if prt && uses.starts_with("actions/checkout") {
-                    let head = step.get("with").and_then(|w| w.get("ref")).and_then(Value::as_str)
-                        .is_some_and(|r| r.contains("pull_request.head"));
-                    if head {
+                let head_ref = |marker: &str| {
+                    step.get("with").and_then(|w| w.get("ref")).and_then(Value::as_str)
+                        .is_some_and(|r| r.contains(marker))
+                };
+                if action == "actions/checkout" {
+                    if prt && head_ref("pull_request.head") {
                         add("pwn-request", Severity::High, line,
                             format!("job `{name}`: pull_request_target checks out untrusted PR head"));
                     }
+                    if wr && head_ref("workflow_run.head") {
+                        add("workflow-run-checkout", Severity::High, line,
+                            format!("job `{name}`: workflow_run checks out the triggering (possibly fork) branch with elevated privileges"));
+                    }
                 }
-                let action = uses.split('@').next().unwrap_or("");
                 if CACHEABLE.contains(&action)
+                    && !job_caches
                     && step.get("with").and_then(|w| w.get("cache")).is_none()
                 {
                     add("missing-cache", Severity::Low, line,
                         format!("job `{name}`: `{action}` without `cache`; dependencies are re-downloaded every run"));
                 }
+                if action == "actions/github-script"
+                    && let Some(script) = step.get("with").and_then(|w| w.get("script")).and_then(Value::as_str)
+                    && let Some(bad) = UNTRUSTED.iter().find(|u| script.contains(*u))
+                {
+                    add("script-injection", Severity::High, locate(&lines, bad, next),
+                        format!("job `{name}`: `{bad}` interpolated into github-script; read it from `context` instead"));
+                }
             }
-            if let Some(run) = step.get("run").and_then(Value::as_str)
-                && let Some(bad) = UNTRUSTED.iter().find(|u| run.contains(*u))
-            {
-                add("script-injection", Severity::High, locate(&lines, bad, next),
-                    format!("job `{name}`: `{bad}` interpolated into `run`; pass via env instead"));
+            if let Some(run) = step.get("run").and_then(Value::as_str) {
+                if let Some(bad) = UNTRUSTED.iter().find(|u| run.contains(*u)) {
+                    add("script-injection", Severity::High, locate(&lines, bad, next),
+                        format!("job `{name}`: `{bad}` interpolated into `run`; pass via env instead"));
+                }
+                if let Some(cmd) = DEPRECATED_COMMANDS.iter().find(|c| run.contains(*c)) {
+                    add("deprecated-command", Severity::Medium, locate(&lines, cmd, next),
+                        format!("job `{name}`: `{cmd}` is disabled; write to $GITHUB_OUTPUT / $GITHUB_STATE / $GITHUB_ENV / $GITHUB_PATH"));
+                }
             }
         }
     }
@@ -185,6 +273,32 @@ mod tests {
         for want in ["missing-concurrency", "expensive-runner", "missing-cache"] {
             assert!(r.contains(&want), "missing {want}: {r:?}");
         }
+    }
+
+    #[test]
+    fn new_security_rules() {
+        let y = "on:\n  workflow_run:\n    workflows: [x]\npermissions: write-all\njobs:\n  a:\n    uses: o/r/.github/workflows/w.yml@main\n    secrets: inherit\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          ref: ${{ github.event.workflow_run.head_sha }}\n      - run: echo \"::set-output name=a::b\"\n      - uses: actions/github-script@v7\n        with:\n          script: console.log('${{ github.event.issue.title }}')\n";
+        let r = names(y);
+        for want in ["write-all-permissions", "secrets-inherit", "workflow-run-checkout", "deprecated-command", "script-injection"] {
+            assert!(r.contains(&want), "missing {want}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn outdated_actions_tag_and_sha_comment() {
+        let sha = "c".repeat(40);
+        let y = format!("on: push\npermissions: read-all\njobs:\n  a:\n    steps:\n      - uses: actions/upload-artifact@v3\n      - uses: actions/cache@{sha} # v2.1.0\n      - uses: actions/checkout@v4\n");
+        let f = found(&y);
+        let lines: Vec<_> = f.iter().filter(|f| f.rule == "outdated-action").map(|f| f.line).collect();
+        assert_eq!(lines, vec![6, 7]);
+    }
+
+    #[test]
+    fn noise_reduction() {
+        let y = "on: workflow_dispatch\njobs:\n  a:\n    permissions: read-all\n    timeout-minutes: 5\n    runs-on: ubuntu-latest\n    steps:\n      - uses: Swatinem/rust-cache@v2\n      - uses: actions/setup-node@v4\n";
+        let r = names(y);
+        assert!(!r.contains(&"missing-permissions"));
+        assert!(!r.contains(&"missing-cache"));
     }
 
     #[test]
