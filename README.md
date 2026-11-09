@@ -8,6 +8,20 @@ Fast Rust CLI that audits GitHub Actions workflows for **security** and **CI-cos
 cargo install ciguard   # or: cargo install --path .
 ```
 
+## Example
+
+```console
+$ ciguard examples/vulnerable.yml
+[Medium] examples/vulnerable.yml:1 missing-permissions - no `permissions` at workflow level or on every job; token defaults may be overly broad
+[Low] examples/vulnerable.yml:4 missing-timeout - job `build` has no timeout-minutes (default 360 min can waste CI spend)
+[Low] examples/vulnerable.yml:5 expensive-runner - job `build` runs on `macos-latest` (billed at a multiple of Linux)
+[High] examples/vulnerable.yml:7 unpinned-action - job `build`: `actions/checkout@v3` is not pinned to a commit SHA
+[Medium] examples/vulnerable.yml:7 outdated-action - job `build`: `actions/checkout` v3 is deprecated; use v4 or newer
+[High] examples/vulnerable.yml:7 pwn-request - job `build`: pull_request_target checks out untrusted PR head
+[High] examples/vulnerable.yml:10 script-injection - job `build`: `github.event.pull_request.title` interpolated into `run`; pass via env instead
+7 finding(s)
+```
+
 ## Usage
 
 ```sh
