@@ -1,6 +1,11 @@
 # ciguard
 
-Fast Rust CLI that audits GitHub Actions workflows for **security** and **CI-cost** problems.
+Fast Rust CLI that checks GitHub Actions workflows for common **security** and
+**CI-cost** problems.
+
+ciguard is a static heuristic checker, not a complete security audit. Treat its
+findings as review input and continue to review workflow changes, permissions,
+and third-party action provenance.
 
 ## Install
 
@@ -37,8 +42,12 @@ ciguard --fix                    # pin tag-referenced actions to commit SHAs
 
 `--fix` queries the GitHub API (set `GITHUB_TOKEN` to avoid rate limits) and rewrites
 `uses: actions/checkout@v4` to `uses: actions/checkout@<sha> # v4`.
+It makes no changes if any action reference cannot be resolved.
 
 Exit codes: `0` clean, `1` findings at/above `--fail-on`, `2` error.
+
+The supported minimum Rust version is 1.85.0. CI tests the current stable toolchain;
+release builds use Rust 1.85.0 for reproducibility.
 
 ## Rules
 
@@ -60,7 +69,8 @@ Exit codes: `0` clean, `1` findings at/above `--fail-on`, `2` error.
 
 ## Configuration
 
-Create `.ciguard.toml` in the scanned directory (or pass `--config`):
+Create `.ciguard.toml` in the scanned directory (or pass `--config`). When scanning a
+single workflow file, ciguard searches its parent directories and uses the nearest config:
 
 ```toml
 disable = ["missing-timeout"]      # turn rules off
@@ -77,7 +87,8 @@ Suppress individual findings inline, on the same line or a comment line directly
 build:
 ```
 
-Use `# ciguard:ignore-file [rule,...]` anywhere in a file to silence rules for the whole file.
+Use `# ciguard:ignore-file [rule,...]` in a YAML comment to silence rules for the
+whole file. Directives inside quoted or block-scalar values are ignored.
 
 ## GitHub Action
 
@@ -86,13 +97,16 @@ permissions:
   contents: read
   security-events: write
 steps:
-  - uses: actions/checkout@v4
-  - uses: rodo-gatti/ciguard@main
+  - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+  - uses: rodo-gatti/ciguard@<full-commit-sha>
     with:
       fail-on: high
 ```
 
-Results are uploaded to GitHub code scanning as SARIF.
+Replace `<full-commit-sha>` with an audited immutable release commit. Do not use a
+branch or mutable tag. Results are uploaded to GitHub code scanning as SARIF. The
+action installs Rust 1.85.0 itself; self-hosted runners need outbound access to
+GitHub and crates.io while it builds ciguard, plus a Bash-capable shell.
 
 ## License
 

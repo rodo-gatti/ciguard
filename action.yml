@@ -1,5 +1,5 @@
 name: ciguard
-description: Audit GitHub Actions workflows for security and CI-cost issues
+description: Check GitHub Actions workflows for common security and CI-cost issues
 inputs:
   fail-on:
     description: Minimum severity that fails the step (low, medium, high)
@@ -7,18 +7,32 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install ciguard
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # 1.85.0
+      with:
+        toolchain: 1.85.0
+    - name: Build ciguard
       shell: bash
-      run: cargo install --locked --git https://github.com/rodo-gatti/ciguard --root "$RUNNER_TEMP/ag"
+      env:
+        CARGO_TARGET_DIR: ${{ runner.temp }}/ciguard-target
+      run: cargo build --locked --release --manifest-path "$GITHUB_ACTION_PATH/Cargo.toml"
     - name: Generate SARIF
       shell: bash
-      run: '"$RUNNER_TEMP/ag/bin/ciguard" . --format sarif --fail-on high > ciguard.sarif || true'
+      env:
+        FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        set +e
+        "$RUNNER_TEMP/ciguard-target/release/ciguard" . --format sarif --fail-on "$FAIL_ON" > ciguard.sarif
+        status=$?
+        set -e
+        if [ "$status" -eq 2 ]; then
+          exit "$status"
+        fi
+        echo "CIGUARD_EXIT=$status" >> "$GITHUB_ENV"
     - name: Upload SARIF
       uses: github/codeql-action/upload-sarif@9418214df1f2c4b8128c770156c409013b07d6b9 # v3
       with:
         sarif_file: ciguard.sarif
     - name: Gate
       shell: bash
-      env:
-        FAIL_ON: ${{ inputs.fail-on }}
-      run: '"$RUNNER_TEMP/ag/bin/ciguard" . --fail-on "$FAIL_ON"'
+      run: exit "$CIGUARD_EXIT"

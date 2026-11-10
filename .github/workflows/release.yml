@@ -27,8 +27,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # 1.85.0
         with:
+          toolchain: 1.85.0
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Verify tag matches package version
@@ -36,6 +37,8 @@ jobs:
         run: |
           version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
           test "${GITHUB_REF_NAME}" = "v${version}"
+      - name: Test
+        run: cargo test --locked
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Package Unix binary
@@ -65,6 +68,8 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      attestations: write
+      id-token: write
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -72,6 +77,9 @@ jobs:
           merge-multiple: true
       - name: Create checksums
         run: cd dist && sha256sum * > SHA256SUMS
+      - uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: dist/*
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           generate_release_notes: true

@@ -3,7 +3,7 @@ mod fix;
 mod rules;
 mod sarif;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use rules::Finding;
 use std::path::{Path, PathBuf};
@@ -13,7 +13,7 @@ use walkdir::WalkDir;
 #[derive(Parser)]
 #[command(
     version,
-    about = "Audit GitHub Actions workflows for security and cost issues"
+    about = "Check GitHub Actions workflows for common security and cost issues"
 )]
 struct Cli {
     /// Repository root or a single workflow file
@@ -39,40 +39,70 @@ enum Format {
     Sarif,
 }
 
-fn workflow_files(path: &Path) -> Vec<PathBuf> {
+fn workflow_files(path: &Path) -> Result<Vec<PathBuf>> {
     if path.is_file() {
-        return vec![path.to_path_buf()];
+        return Ok(vec![path.to_path_buf()]);
     }
-    WalkDir::new(path.join(".github/workflows"))
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .is_some_and(|x| x == "yml" || x == "yaml")
-        })
-        .map(|e| e.into_path())
-        .collect()
+    if !path.is_dir() {
+        bail!(
+            "scan path does not exist or is not a directory: {}",
+            path.display()
+        );
+    }
+
+    let workflow_dir = path.join(".github/workflows");
+    if !workflow_dir.is_dir() {
+        bail!(
+            "workflow directory does not exist: {}",
+            workflow_dir.display()
+        );
+    }
+
+    let mut files = Vec::new();
+    for entry in WalkDir::new(&workflow_dir) {
+        let entry = entry.with_context(|| format!("walking {}", workflow_dir.display()))?;
+        if entry
+            .path()
+            .extension()
+            .is_some_and(|x| x == "yml" || x == "yaml")
+        {
+            files.push(entry.into_path());
+        }
+    }
+    files.sort();
+    if files.is_empty() {
+        bail!("no workflow files found in {}", workflow_dir.display());
+    }
+    Ok(files)
 }
 
 fn run() -> Result<bool> {
     let cli = Cli::parse();
     let mut all: Vec<Finding> = Vec::new();
+    let files = workflow_files(&cli.path)?;
     let cfg = config::Config::load(cli.config.as_deref(), &cli.path)?;
-    for file in workflow_files(&cli.path) {
+    let mut pending_writes = Vec::new();
+    for file in files {
         let mut text = std::fs::read_to_string(&file)
             .with_context(|| format!("reading {}", file.display()))?;
         if cli.fix {
-            let (fixed, n) = fix::pin_actions_online(&text);
+            let (fixed, n) = fix::pin_actions_online(&text)
+                .with_context(|| format!("pinning actions in {}", file.display()))?;
             if n > 0 {
-                std::fs::write(&file, &fixed)
-                    .with_context(|| format!("writing {}", file.display()))?;
-                eprintln!("fixed {n} action(s) in {}", file.display());
+                pending_writes.push((file.clone(), fixed.clone(), n));
                 text = fixed;
             }
         }
         let found = rules::analyze(&file.display().to_string(), &text)?;
         all.extend(config::suppress(&text, found));
+    }
+    let replacements = pending_writes
+        .iter()
+        .map(|(file, fixed, _)| (file.clone(), fixed.clone()))
+        .collect::<Vec<_>>();
+    fix::replace_files_atomically(&replacements)?;
+    for (file, _, n) in pending_writes {
+        eprintln!("fixed {n} action(s) in {}", file.display());
     }
     let all = cfg.apply(all);
     match cli.format {
@@ -85,6 +115,7 @@ fn run() -> Result<bool> {
                     f.severity, f.file, f.line, f.rule, f.message
                 );
             }
+
             println!("{} finding(s)", all.len());
         }
     }
@@ -99,5 +130,31 @@ fn main() -> ExitCode {
             eprintln!("error: {e:#}");
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workflow_files_rejects_missing_paths_and_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(workflow_files(&dir.path().join("missing")).is_err());
+        assert!(workflow_files(dir.path()).is_err());
+    }
+
+    #[test]
+    fn workflow_files_finds_only_yaml_workflows() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflows = dir.path().join(".github/workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(workflows.join("a.yaml"), "on: push\n").unwrap();
+        std::fs::write(workflows.join("note.txt"), "not a workflow\n").unwrap();
+
+        assert_eq!(
+            workflow_files(dir.path()).unwrap(),
+            vec![workflows.join("a.yaml")]
+        );
     }
 }

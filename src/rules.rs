@@ -90,18 +90,6 @@ const MIN_MAJOR: &[(&str, u32)] = &[
 
 const DEPRECATED_COMMANDS: &[&str] = &["::set-output", "::save-state", "::set-env", "::add-path"];
 
-const UNTRUSTED: &[&str] = &[
-    "github.event.issue.title",
-    "github.event.issue.body",
-    "github.event.pull_request.title",
-    "github.event.pull_request.body",
-    "github.event.comment.body",
-    "github.event.review.body",
-    "github.head_ref",
-    "github.event.pull_request.head.ref",
-    "github.event.head_commit.message",
-];
-
 const CACHEABLE: &[&str] = &[
     "actions/setup-node",
     "actions/setup-python",
@@ -149,6 +137,27 @@ fn version_of(r: &str, line: &str) -> Option<u32> {
 
 fn is_write_all(v: Option<&Value>) -> bool {
     v.and_then(Value::as_str) == Some("write-all")
+}
+
+fn is_untrusted_pr_ref(ref_: &str) -> bool {
+    [
+        "github.head_ref",
+        "github.event.pull_request.head.ref",
+        "github.event.pull_request.head.sha",
+    ]
+    .iter()
+    .any(|marker| ref_.contains(marker))
+}
+
+/// Direct interpolation of any event payload is unsafe in shell and script source.
+fn untrusted_expression(source: &str) -> Option<&str> {
+    if source.contains("github.event.") {
+        Some("github.event.")
+    } else if source.contains("github.head_ref") {
+        Some("github.head_ref")
+    } else {
+        None
+    }
 }
 
 pub fn analyze(file: &str, text: &str) -> Result<Vec<Finding>> {
@@ -233,6 +242,18 @@ pub fn analyze(file: &str, text: &str) -> Result<Vec<Finding>> {
                 format!("job `{name}` has no timeout-minutes (default 360 min can waste CI spend)"),
             );
         }
+        if let Some(uses) = job.get("uses").and_then(Value::as_str) {
+            let line = locate(&lines, uses, next);
+            let (_, r) = uses.split_once('@').unwrap_or((uses, ""));
+            if !uses.starts_with("./") && !is_sha(r) {
+                add(
+                    "unpinned-action",
+                    Severity::High,
+                    line,
+                    format!("job `{name}`: `{uses}` is not pinned to a commit SHA"),
+                );
+            }
+        }
         let runner = job.get("runs-on").and_then(Value::as_str).unwrap_or("");
         if runner.starts_with("macos") || runner.starts_with("windows") {
             add(
@@ -250,9 +271,24 @@ pub fn analyze(file: &str, text: &str) -> Result<Vec<Finding>> {
             .iter()
             .filter_map(uses_of)
             .any(|u| u.contains("cache"));
+        let mut step_from = next;
         for step in steps {
+            let step_line = step
+                .get("uses")
+                .and_then(Value::as_str)
+                .map(|uses| locate(&lines, uses, step_from))
+                .or_else(|| {
+                    step.get("run")
+                        .and_then(Value::as_str)
+                        .map(|_| locate(&lines, "run:", step_from))
+                })
+                .unwrap_or(0);
+            if step_line > 0 {
+                step_from = step_line;
+            }
+
             if let Some(uses) = step.get("uses").and_then(Value::as_str) {
-                let line = locate(&lines, uses, next);
+                let line = step_line;
                 let (action, r) = uses.split_once('@').unwrap_or((uses, ""));
                 if !uses.starts_with("./") && !uses.starts_with("docker://") {
                     if !is_sha(r) {
@@ -278,14 +314,12 @@ pub fn analyze(file: &str, text: &str) -> Result<Vec<Finding>> {
                         );
                     }
                 }
-                let head_ref = |marker: &str| {
-                    step.get("with")
-                        .and_then(|w| w.get("ref"))
-                        .and_then(Value::as_str)
-                        .is_some_and(|r| r.contains(marker))
-                };
                 if action == "actions/checkout" {
-                    if prt && head_ref("pull_request.head") {
+                    let checkout_ref = step
+                        .get("with")
+                        .and_then(|w| w.get("ref"))
+                        .and_then(Value::as_str);
+                    if prt && checkout_ref.is_some_and(is_untrusted_pr_ref) {
                         add(
                             "pwn-request",
                             Severity::High,
@@ -295,7 +329,7 @@ pub fn analyze(file: &str, text: &str) -> Result<Vec<Finding>> {
                             ),
                         );
                     }
-                    if wr && head_ref("workflow_run.head") {
+                    if wr && checkout_ref.is_some_and(|r| r.contains("workflow_run.head")) {
                         add(
                             "workflow-run-checkout",
                             Severity::High,
@@ -324,12 +358,12 @@ pub fn analyze(file: &str, text: &str) -> Result<Vec<Finding>> {
                         .get("with")
                         .and_then(|w| w.get("script"))
                         .and_then(Value::as_str)
-                    && let Some(bad) = UNTRUSTED.iter().find(|u| script.contains(*u))
+                    && let Some(bad) = untrusted_expression(script)
                 {
                     add(
                         "script-injection",
                         Severity::High,
-                        locate(&lines, bad, next),
+                        locate(&lines, bad, step_line.saturating_sub(1)),
                         format!(
                             "job `{name}`: `{bad}` interpolated into github-script; read it from `context` instead"
                         ),
@@ -337,11 +371,11 @@ pub fn analyze(file: &str, text: &str) -> Result<Vec<Finding>> {
                 }
             }
             if let Some(run) = step.get("run").and_then(Value::as_str) {
-                if let Some(bad) = UNTRUSTED.iter().find(|u| run.contains(*u)) {
+                if let Some(bad) = untrusted_expression(run) {
                     add(
                         "script-injection",
                         Severity::High,
-                        locate(&lines, bad, next),
+                        locate(&lines, bad, step_line.saturating_sub(1)),
                         format!(
                             "job `{name}`: `{bad}` interpolated into `run`; pass via env instead"
                         ),
@@ -351,7 +385,7 @@ pub fn analyze(file: &str, text: &str) -> Result<Vec<Finding>> {
                     add(
                         "deprecated-command",
                         Severity::Medium,
-                        locate(&lines, cmd, next),
+                        locate(&lines, cmd, step_line.saturating_sub(1)),
                         format!(
                             "job `{name}`: `{cmd}` is disabled; write to $GITHUB_OUTPUT / $GITHUB_STATE / $GITHUB_ENV / $GITHUB_PATH"
                         ),
@@ -435,6 +469,56 @@ mod tests {
             .map(|f| f.line)
             .collect();
         assert_eq!(lines, vec![6, 7]);
+    }
+
+    #[test]
+    fn checks_reusable_workflow_pins() {
+        let sha = "a".repeat(40);
+        let unpinned = format!(
+            "on: workflow_dispatch\njobs:\n  deploy:\n    uses: acme/deploy/.github/workflows/release.yml@main\n  local:\n    uses: ./.github/workflows/local.yml\n  pinned:\n    uses: acme/deploy/.github/workflows/release.yml@{sha}\n"
+        );
+        let findings = found(&unpinned);
+        let pins: Vec<_> = findings
+            .iter()
+            .filter(|f| f.rule == "unpinned-action")
+            .collect();
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].line, 4);
+    }
+
+    #[test]
+    fn flags_all_supported_pull_request_head_refs() {
+        for reference in [
+            "github.head_ref",
+            "github.event.pull_request.head.ref",
+            "github.event.pull_request.head.sha",
+        ] {
+            let y = format!(
+                "on: pull_request_target\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@{}\n        with:\n          ref: ${{{{ {reference} }}}}\n",
+                "a".repeat(40)
+            );
+            assert!(
+                names(&y).contains(&"pwn-request"),
+                "missing pwn-request for {reference}"
+            );
+        }
+    }
+
+    #[test]
+    fn reports_repeated_steps_at_their_own_lines() {
+        let y = "on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/checkout@v4\n";
+        let lines: Vec<_> = found(y)
+            .iter()
+            .filter(|f| f.rule == "unpinned-action")
+            .map(|f| f.line)
+            .collect();
+        assert_eq!(lines, vec![6, 7]);
+    }
+
+    #[test]
+    fn flags_all_direct_event_expressions_in_shell_source() {
+        let y = "on: pull_request\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo \"${{ github.event.pull_request.labels.*.name }}\"\n";
+        assert!(names(y).contains(&"script-injection"));
     }
 
     #[test]
